@@ -12,10 +12,8 @@ __pycache__/
 venv/
 env/
 
-# 로그
+# 로그 (절대 커밋 금지)
 *.log
-dawn_prayer_bot.log
-tsc_bot.log
 
 # 임시 자막
 tmp_subs/

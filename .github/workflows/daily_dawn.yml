@@ -48,7 +48,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add outputs/ dawn_prayer_bot.log 2>/dev/null || true
+          # outputs/ 폴더의 큐티 결과만 커밋 (로그 파일은 .gitignore로 제외됨)
+          git add outputs/ 2>/dev/null || true
           git diff --cached --quiet && echo "변경사항 없음, 커밋 생략" || \
             git commit -m "dawn: $(date '+%Y-%m-%d') 큐티 업데이트"
           git push

@@ -2,7 +2,7 @@ name: Daily Dawn Prayer QT
 
 on:
   schedule:
-    # 매일 KST 08:00 = UTC 23:00 (전날)
+    # 매일 KST 08:00 = UTC 23:00 (다음날)
     - cron: '0 23 * * *'
   workflow_dispatch: # 수동 실행 버튼
 

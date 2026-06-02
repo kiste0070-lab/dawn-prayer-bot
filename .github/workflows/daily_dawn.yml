@@ -1,0 +1,54 @@
+name: Daily Dawn Prayer QT
+
+on:
+  schedule:
+    # 매일 KST 08:00 = UTC 23:00 (전날)
+    - cron: '0 23 * * *'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # outputs/ 커밋/푸시에 필요
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Node.js (for yt-dlp JS runtime)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Dawn Prayer Bot
+        env:
+          TZ: Asia/Seoul
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GEMINI_MODEL_PRIMARY: ${{ secrets.GEMINI_MODEL_PRIMARY || 'gemma-4-26b-a4b-it' }}
+          GEMINI_MODEL_SECONDARY: ${{ secrets.GEMINI_MODEL_SECONDARY || 'gemini-2.5-flash' }}
+          PLAYLIST_URL: ${{ secrets.PLAYLIST_URL || 'https://youtube.com/playlist?list=PLHEvWqh20QZJdZlsooU4gnoe8EAnqt_yF' }}
+        run: python main.py
+
+      - name: Commit and push outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs/ dawn_prayer_bot.log 2>/dev/null || true
+          git diff --cached --quiet && echo "변경사항 없음, 커밋 생략" || \
+            git commit -m "dawn: $(date '+%Y-%m-%d') 큐티 업데이트"
+          git push

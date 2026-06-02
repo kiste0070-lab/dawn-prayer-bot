@@ -1,0 +1,31 @@
+# 환경 변수 (절대 커밋 금지)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 로그
+*.log
+dawn_prayer_bot.log
+tsc_bot.log
+
+# 임시 자막
+tmp_subs/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Ruff
+.ruff_cache/
+.sisyphus/

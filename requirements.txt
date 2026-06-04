@@ -4,3 +4,4 @@ google-genai>=1.0.0
 python-telegram-bot>=21.0
 python-dotenv>=1.0.0
 pydantic>=2.5.0
+requests>=2.31.0  # Invidious 폴백용 (third-party 프록시)

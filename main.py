@@ -188,31 +188,69 @@ def get_playlist_entries(playlist_url: str, n: int = 3) -> list[VideoInfo]:
         return result
 
 
+# yt-dlp 봇 차단을 우회하기 위해 다양한 player client 순차 시도.
+# - mediaconnect / tv_embedded / ios_creator / android 는
+#   'web' 클라이언트와 다른 인증/엔드포인트를 사용해서
+#   GitHub Actions 등 클라우드 IP에서 봇 차단이 덜하다.
+# - 'default'는 로컬에서는 잘 작동하지만 클라우드에서는 차단됨.
+YTDLP_PLAYER_CLIENTS: list[str | None] = [
+    None,            # default (로컬 폴백)
+    "mediaconnect",  # 가장 새로운 클라이언트, 봇 차단 적음
+    "tv_embedded",   # TV 임베디드, 다른 IP 풀
+    "ios_creator",   # iOS Creator Studio
+    "android",       # Android
+]
+
+
 def download_korean_subtitle_ytdlp(video_id: str) -> Path:
-    """yt-dlp로 한국어 자동 자막(VTT)을 임시 폴더에 저장하고 경로 반환."""
+    """yt-dlp로 한국어 자동 자막(VTT)을 임시 폴더에 저장하고 경로 반환.
+
+    여러 player client를 순차적으로 시도해 봇 차단을 우회한다.
+    """
     tmp_dir = BASE_DIR / "tmp_subs"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(tmp_dir / f"{video_id}.%(ext)s")
-
-    ydl_opts = {
-        "skip_download": True,
-        "writeautomaticsub": True,
-        "writesubtitles": False,
-        "subtitleslangs": ["ko", "ko-orig"],
-        "subtitlesformat": "vtt",
-        "outtmpl": outtmpl,
-        "js_runtimes": {"node": {}},
-        "quiet": True,
-    }
     url = f"https://www.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
 
-    # 다운로드된 vtt 파일 찾기
-    candidates = sorted(tmp_dir.glob(f"{video_id}*.vtt"))
-    if not candidates:
-        raise RuntimeError(f"한국어 자막(VTT)을 찾을 수 없습니다: {video_id}")
-    return candidates[0]
+    last_error: Exception | None = None
+    for client in YTDLP_PLAYER_CLIENTS:
+        ydl_opts = {
+            "skip_download": True,
+            "writeautomaticsub": True,
+            "writesubtitles": False,
+            "subtitleslangs": ["ko", "ko-orig"],
+            "subtitlesformat": "vtt",
+            "outtmpl": outtmpl,
+            "js_runtimes": {"node": {}},
+            "quiet": True,
+        }
+        if client:
+            ydl_opts["extractor_args"] = {"youtube": {"player_client": client}}
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            candidates = sorted(tmp_dir.glob(f"{video_id}*.vtt"))
+            if candidates:
+                logger.info(
+                    f"yt-dlp 자막 추출 성공 (client={client or 'default'}, {video_id})"
+                )
+                return candidates[0]
+            else:
+                logger.debug(
+                    f"yt-dlp client={client or 'default'}: VTT 파일 미생성 ({video_id})"
+                )
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.debug(
+                f"yt-dlp client={client or 'default'} 실패 ({video_id}): {str(e)[:120]}"
+            )
+            continue
+
+    raise RuntimeError(
+        f"모든 yt-dlp player client 실패 ({video_id}): {str(last_error)[:200] if last_error else 'unknown'}"
+    )
 
 
 def parse_vtt_to_text(vtt_path: Path) -> str:
@@ -316,13 +354,106 @@ def fetch_subtitle_text_via_yta(video_id: str) -> str:
     )
 
 
+# Invidious 공개 인스턴스 (third-party 프록시, GitHub Actions IP 우회 가능)
+# 인스턴스는 자주 죽거나 rate-limit되므로 여러 개를 시도한다.
+INVIDIOUS_INSTANCES: list[str] = [
+    "https://inv.nadeko.net",
+    "https://yewtu.be",
+    "https://invidious.lunar.icu",
+    "https://iv.melmac.space",
+    "https://invidious.materialio.us",
+    "https://invidious.fdn.fr",
+    "https://invidious.privacydev.net",
+]
+
+
+def _fetch_subtitle_text_via_invidious(video_id: str) -> str:
+    """Invidious 공개 인스턴스 체인으로 한국어 자막 추출.
+
+    각 인스턴스는 YouBot 차단을 우회하는 자체 IP를 사용한다.
+    다만 인스턴스 자체가 down/rate-limit일 수 있어 체인으로 시도한다.
+    """
+    import requests  # 지연 import (의존성 가벼움)
+
+    last_error: Exception | None = None
+    for base in INVIDIOUS_INSTANCES:
+        try:
+            # 1) 사용 가능한 caption 목록 조회
+            resp = requests.get(
+                f"{base}/api/v1/captions/{video_id}",
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                logger.debug(
+                    f"Invidious {base}: captions list HTTP {resp.status_code}"
+                )
+                continue
+            data = resp.json()
+            captions = (
+                data.get("captions", []) if isinstance(data, dict) else data
+            )
+            if not captions:
+                logger.debug(f"Invidious {base}: 캡션 없음")
+                continue
+
+            # 한국어 자동 생성 캡션 우선
+            ko_caption = next(
+                (
+                    c
+                    for c in captions
+                    if c.get("languageCode", "").startswith("ko")
+                ),
+                None,
+            )
+            if not ko_caption:
+                logger.debug(f"Invidious {base}: 한국어 캡션 없음")
+                continue
+
+            label = ko_caption.get("label") or "Korean"
+            # 2) 실제 VTT 본문 fetch
+            vtt_resp = requests.get(
+                f"{base}/api/v1/captions/{video_id}",
+                params={"label": label},
+                timeout=15,
+            )
+            if vtt_resp.status_code != 200 or not vtt_resp.content.strip():
+                logger.debug(
+                    f"Invidious {base}: VTT 본문 비어있음 (HTTP {vtt_resp.status_code})"
+                )
+                continue
+
+            # Invidious가 text/vtt로 반환. parse_vtt_to_text로 통일.
+            vtt_text = vtt_resp.text
+            tmp_dir = BASE_DIR / "tmp_subs"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_vtt = tmp_dir / f"{video_id}_invidious.vtt"
+            tmp_vtt.write_text(vtt_text, encoding="utf-8")
+            cleaned = parse_vtt_to_text(tmp_vtt)
+            if cleaned:
+                logger.info(
+                    f"Invidious 자막 추출 성공 (instance={base}, {video_id}, "
+                    f"{len(cleaned)}자)"
+                )
+                return cleaned
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.debug(f"Invidious {base} 실패: {str(e)[:100]}")
+            continue
+
+    raise RuntimeError(
+        f"Invidious 모든 인스턴스 실패 ({video_id}): {str(last_error)[:120] if last_error else 'unknown'}"
+    )
+
+
 def fetch_subtitle_text(video_id: str) -> str:
     """비디오 ID로 한국어 자막을 추출.
 
     우선순위:
       1) youtube-transcript-api (GitHub Actions에서도 안정적, 라이브 자막도 OK)
-      2) yt-dlp (VTT 다운로드 → 파싱) — 폴백
+      2) yt-dlp (VTT 다운로드 → 파싱) — 다양한 player client 순차 시도
+      3) Invidious 공개 인스턴스 — 최종 폴백 (third-party IP 우회)
     """
+    # 1차: youtube-transcript-api
     try:
         return fetch_subtitle_text_via_yta(video_id)
     except Exception as e:  # noqa: BLE001
@@ -330,10 +461,18 @@ def fetch_subtitle_text(video_id: str) -> str:
             f"youtube-transcript-api 실패, yt-dlp로 폴백 ({video_id}): {str(e)[:150]}"
         )
 
-    # yt-dlp 폴백
+    # 2차: yt-dlp (다양한 player client 순차 시도)
     try:
         vtt_path = download_korean_subtitle_ytdlp(video_id)
         return parse_vtt_to_text(vtt_path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"yt-dlp 실패, Invidious로 폴백 ({video_id}): {str(e)[:150]}"
+        )
+
+    # 3차: Invidious 공개 인스턴스
+    try:
+        return _fetch_subtitle_text_via_invidious(video_id)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(
             f"모든 자막 추출 방법 실패 ({video_id}): {str(e)[:200]}"

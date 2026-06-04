@@ -188,8 +188,8 @@ def get_playlist_entries(playlist_url: str, n: int = 3) -> list[VideoInfo]:
         return result
 
 
-def download_korean_subtitle(video_id: str) -> Path:
-    """지정 비디오의 한국어 자동 자막(VTT)을 임시 폴더에 저장하고 경로 반환."""
+def download_korean_subtitle_ytdlp(video_id: str) -> Path:
+    """yt-dlp로 한국어 자동 자막(VTT)을 임시 폴더에 저장하고 경로 반환."""
     tmp_dir = BASE_DIR / "tmp_subs"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(tmp_dir / f"{video_id}.%(ext)s")
@@ -211,7 +211,7 @@ def download_korean_subtitle(video_id: str) -> Path:
     # 다운로드된 vtt 파일 찾기
     candidates = sorted(tmp_dir.glob(f"{video_id}*.vtt"))
     if not candidates:
-        raise RuntimeError(f"한국어 자막을 찾을 수 없습니다: {video_id}")
+        raise RuntimeError(f"한국어 자막(VTT)을 찾을 수 없습니다: {video_id}")
     return candidates[0]
 
 
@@ -255,10 +255,89 @@ def parse_vtt_to_text(vtt_path: Path) -> str:
     return "\n".join(cleaned)
 
 
+def _clean_transcript_lines(text: str) -> str:
+    """youtube-transcript-api 결과에서 중복/비언어 메타 제거 후 한국어 위주 텍스트 반환."""
+    # VTT 태그, 비언어 메타 제거
+    text = VTT_TAG_PATTERN.sub("", text)
+    text = NON_KOREAN_AUDIO_PATTERN.sub("", text)
+    # 공백 정규화
+    lines = [WHITESPACE_PATTERN.sub(" ", ln).strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+
+    # 중복 라인 제거
+    deduped: list[str] = []
+    prev: str | None = None
+    for s in lines:
+        if s != prev:
+            deduped.append(s)
+        prev = s
+
+    # 한글이 하나라도 포함된 라인만 유지
+    cleaned = [ln for ln in deduped if any("\uac00" <= ch <= "\ud7a3" for ch in ln)]
+    return "\n".join(cleaned)
+
+
+def fetch_subtitle_text_via_yta(video_id: str) -> str:
+    """youtube-transcript-api로 한국어 자막을 추출 (yt-dlp 봇 차단을 우회).
+
+    youtube-transcript-api는 YouTube transcript 엔드포인트를 직접 호출하므로
+    GitHub Actions의 IP가 YouTube 봇 차단에 걸려도 작동할 가능성이 높다.
+    """
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError as e:
+        raise RuntimeError(
+            "youtube-transcript-api 미설치. requirements.txt 설치 필요."
+        ) from e
+
+    api = YouTubeTranscriptApi()
+    last_error: Exception | None = None
+    # 우선순위: ko → ko-orig → en (fallback)
+    for langs in (["ko"], ["ko-orig"], ["ko", "en"], ["en"]):
+        try:
+            fetched = api.fetch(video_id, languages=langs)
+            snippets = list(fetched)
+            if not snippets:
+                continue
+            raw_text = " ".join(s.text for s in snippets)
+            cleaned = _clean_transcript_lines(raw_text)
+            if cleaned:
+                logger.info(
+                    f"youtube-transcript-api 자막 추출 성공 ({video_id}, langs={langs}, "
+                    f"{len(snippets)} segments, {len(cleaned)}자)"
+                )
+                return cleaned
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.debug(f"youtube-transcript-api 실패 (langs={langs}): {str(e)[:120]}")
+            continue
+    raise RuntimeError(
+        f"youtube-transcript-api로 자막 추출 실패 ({video_id}): {last_error}"
+    )
+
+
 def fetch_subtitle_text(video_id: str) -> str:
-    """비디오 ID로 한국어 자막을 추출해 깨끗한 텍스트로 반환."""
-    vtt_path = download_korean_subtitle(video_id)
-    return parse_vtt_to_text(vtt_path)
+    """비디오 ID로 한국어 자막을 추출.
+
+    우선순위:
+      1) youtube-transcript-api (GitHub Actions에서도 안정적, 라이브 자막도 OK)
+      2) yt-dlp (VTT 다운로드 → 파싱) — 폴백
+    """
+    try:
+        return fetch_subtitle_text_via_yta(video_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"youtube-transcript-api 실패, yt-dlp로 폴백 ({video_id}): {str(e)[:150]}"
+        )
+
+    # yt-dlp 폴백
+    try:
+        vtt_path = download_korean_subtitle_ytdlp(video_id)
+        return parse_vtt_to_text(vtt_path)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"모든 자막 추출 방법 실패 ({video_id}): {str(e)[:200]}"
+        ) from e
 
 
 # ============================================================

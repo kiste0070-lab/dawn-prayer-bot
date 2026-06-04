@@ -79,6 +79,13 @@ class Settings(BaseModel):
     model_primary: str = "gemma-4-26b-a4b-it"
     model_secondary: str = "gemini-2.5-flash"
     playlist_url: str = PLAYLIST_URL
+    # YouTube 자막 추출 안정화 옵션 (선택, GitHub Actions 봇 차단 우회용)
+    # - youtube_cookies_file: Netscape 형식 쿠키 파일 경로
+    #   (브라우저에서 추출, GitHub Secret COOKIES_CONTENT 또는
+    #   secret 파일을 마운트해 사용)
+    youtube_cookies_file: str = Field(
+        default="", description="YouTube 쿠키 파일 경로 (선택, Netscape 형식)"
+    )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -95,6 +102,7 @@ class Settings(BaseModel):
             model_primary=os.getenv("GEMINI_MODEL_PRIMARY", "gemma-4-26b-a4b-it"),
             model_secondary=os.getenv("GEMINI_MODEL_SECONDARY", "gemini-2.5-flash"),
             playlist_url=os.getenv("PLAYLIST_URL", PLAYLIST_URL),
+            youtube_cookies_file=os.getenv("YOUTUBE_COOKIES_FILE", ""),
         )
 
 
@@ -202,15 +210,28 @@ YTDLP_PLAYER_CLIENTS: list[str | None] = [
 ]
 
 
+def _resolve_cookies_file(settings_cookies: str = "") -> str:
+    """쿠키 파일 경로 결정. settings.youtube_cookies_file 또는 환경변수 YOUTUBE_COOKIES_FILE.
+
+    GitHub Actions에서는 보통 마운트된 secret 파일을 사용한다.
+    """
+    path = settings_cookies or os.getenv("YOUTUBE_COOKIES_FILE", "")
+    if path and Path(path).exists():
+        return path
+    return ""
+
+
 def download_korean_subtitle_ytdlp(video_id: str) -> Path:
     """yt-dlp로 한국어 자동 자막(VTT)을 임시 폴더에 저장하고 경로 반환.
 
     여러 player client를 순차적으로 시도해 봇 차단을 우회한다.
+    YOUTUBE_COOKIES_FILE이 설정되어 있으면 인증된 세션으로 시도한다.
     """
     tmp_dir = BASE_DIR / "tmp_subs"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(tmp_dir / f"{video_id}.%(ext)s")
     url = f"https://www.youtube.com/watch?v={video_id}"
+    cookies_file = _resolve_cookies_file()
 
     last_error: Exception | None = None
     for client in YTDLP_PLAYER_CLIENTS:
@@ -226,6 +247,8 @@ def download_korean_subtitle_ytdlp(video_id: str) -> Path:
         }
         if client:
             ydl_opts["extractor_args"] = {"youtube": {"player_client": client}}
+        if cookies_file:
+            ydl_opts["cookiefile"] = cookies_file
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -234,7 +257,8 @@ def download_korean_subtitle_ytdlp(video_id: str) -> Path:
             candidates = sorted(tmp_dir.glob(f"{video_id}*.vtt"))
             if candidates:
                 logger.info(
-                    f"yt-dlp 자막 추출 성공 (client={client or 'default'}, {video_id})"
+                    f"yt-dlp 자막 추출 성공 (client={client or 'default'}, "
+                    f"cookies={'yes' if cookies_file else 'no'}, {video_id})"
                 )
                 return candidates[0]
             else:
@@ -320,6 +344,10 @@ def fetch_subtitle_text_via_yta(video_id: str) -> str:
 
     youtube-transcript-api는 YouTube transcript 엔드포인트를 직접 호출하므로
     GitHub Actions의 IP가 YouTube 봇 차단에 걸려도 작동할 가능성이 높다.
+
+    참고: youtube-transcript-api v1.x에서는 cookie auth가 일시적으로
+    비활성화되어 있다 (YouTube 측 변경 때문). 따라서 이 함수에는
+    쿠키 기능을 노출하지 않고, yt-dlp 경로에서만 쿠키를 사용한다.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi

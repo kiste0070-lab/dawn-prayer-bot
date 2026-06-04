@@ -36,6 +36,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # YouTube 봇 차단 우회용 쿠키 파일 (선택, secret에 등록된 경우에만 동작)
+      # secret: YOUTUBE_COOKIES (Netscape 형식 cookies.txt 내용)
+      - name: Setup YouTube cookies (optional)
+        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
+        run: |
+          mkdir -p /tmp/youtube
+          echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/youtube/cookies.txt
+          echo "쿠키 파일 생성 완료: $(wc -l < /tmp/youtube/cookies.txt) lines"
+
       - name: Run Dawn Prayer Bot
         env:
           TZ: Asia/Seoul
@@ -45,6 +54,7 @@ jobs:
           GEMINI_MODEL_PRIMARY: ${{ secrets.GEMINI_MODEL_PRIMARY || 'gemma-4-26b-a4b-it' }}
           GEMINI_MODEL_SECONDARY: ${{ secrets.GEMINI_MODEL_SECONDARY || 'gemini-2.5-flash' }}
           PLAYLIST_URL: ${{ secrets.PLAYLIST_URL || 'https://youtube.com/playlist?list=PLHEvWqh20QZJdZlsooU4gnoe8EAnqt_yF' }}
+          YOUTUBE_COOKIES_FILE: ${{ secrets.YOUTUBE_COOKIES != '' && '/tmp/youtube/cookies.txt' || '' }}
         run: python main.py
 
       - name: Commit and push outputs

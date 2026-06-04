@@ -5,8 +5,11 @@
 
 ## 동작 흐름
 
-1. GitHub Actions가 매일 **KST 08:00 (UTC 23:00 다음날)** 에 워크플로우 실행
-2. `yt-dlp`로 재생목록 최신 1~3개 영상의 한국어 자동 자막 추출
+1. GitHub Actions가 매일 **KST 07:00~09:00 사이** (UTC 22:00, 실제 지연 있음) 에 워크플로우 실행
+2. 재생목록에서 최신 1~3개 영상의 한국어 자동 자막 추출 (3-tier fallback):
+   1) `youtube-transcript-api` (GitHub Actions에서도 안정적인 경우가 많음)
+   2) `yt-dlp` — 다양한 player client (mediaconnect, tv_embedded, ios_creator, android) 순차 시도
+   3) Invidious 공개 인스턴스 체인 (third-party 프록시, 마지막 폴백)
 3. `google-genai` (`gemma-4-26b-a4b-it` 우선, `gemini-2.5-flash` 폴백) 로 큐티 형식 정리
 4. `python-telegram-bot` 으로 텔레그램 메시지 발송 (Markdown 파싱 실패 시 plain text 자동 폴백)
 5. 결과를 `outputs/YYYY-MM-DD_<videoId>.md` 로 저장 후 git push
@@ -16,11 +19,11 @@
 
 ```
 dawn-prayer-bot/
-├── main.py                       # 메인 로직 (Pydantic 기반)
+├── main.py                       # 메인 로직 (Pydantic 기반, 3-tier 자막 추출)
 ├── requirements.txt              # 의존성
 ├── .env.example                  # 환경변수 템플릿
 ├── .github/workflows/
-│   └── daily_dawn.yml            # 매일 KST 08:00 실행
+│   └── daily_dawn.yml            # 매일 UTC 22:00 실행 (KST 07:00)
 └── outputs/                      # 큐티 결과 (git 커밋됨)
 ```
 
@@ -45,6 +48,25 @@ python main.py --dry-run # 큐티 생성 + 파일 저장만 (텔레그램 생략
 | `GEMINI_MODEL_PRIMARY` | 선택 | 기본값 `gemma-4-26b-a4b-it` (정확한 모델명) |
 | `GEMINI_MODEL_SECONDARY` | 선택 | 기본값 `gemini-2.5-flash` |
 | `PLAYLIST_URL` | 선택 | 기본값 = 새벽예배 재생목록 |
+| `YOUTUBE_COOKIES` | 선택 (권장) | YouTube cookies.txt 내용 (Netscape 형식). 봇 차단 우회용 |
+
+### YouTube 봇 차단 우회: `YOUTUBE_COOKIES` 시크릿 (권장)
+
+GitHub Actions의 IP는 YouTube 봇 차단 목록에 자주 등록되어 있습니다.  
+이 경우 `youtube-transcript-api`와 `yt-dlp` 모두 작동하지 않습니다.
+
+해결책: 브라우저에서 YouTube cookies.txt 를 추출해 시크릿으로 등록합니다.
+
+1. 브라우저(Chrome 등) 로 YouTube에 로그인
+2. 확장 [`Get cookies.txt LOCALLY`](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) 설치
+3. YouTube 도메인(`youtube.com`, `.youtube.com`) 에서 cookies.txt 추출
+4. GitHub 레포 → Settings → Secrets and variables → Actions → New repository secret
+   - Name: `YOUTUBE_COOKIES`
+   - Value: cookies.txt 내용 붙여넣기
+5. (선택) `expiry` 값이 큰 숫자(예: 13자리 이상) 인지 확인. 너무 작으면 yt-dlp 가 거부할 수 있음
+
+시크릿이 등록되면 워크플로우가 자동으로 `/tmp/youtube/cookies.txt` 에 파일을 쓰고
+`yt-dlp` 가 `cookiefile` 옵션으로 인증된 세션으로 자막을 받습니다.
 
 ## 모델
 
